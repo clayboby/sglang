@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import msgspec
 import torch
 
+from sglang.srt.arg_groups.kv_cache_hook import TRANSLATED_MHA_RAILS
 from sglang.srt.arg_groups.overrides import resolving_view
 from sglang.srt.configs.hybrid_arch import (
     hybrid_gdn_config,
@@ -137,10 +138,6 @@ def _get_dsv4_compress_state_dtypes() -> tuple[torch.dtype, torch.dtype]:
 
 
 _is_npu = is_npu()
-
-# The draft attention backends that read a fused draft's rows through the
-# KV-index translator on every path a draft forward takes.
-_TRANSLATED_MHA_RAILS = frozenset({"triton", "flashinfer", "fa3"})
 
 
 def unified_fp8_for_dsv4_pool(*, is_draft_worker: bool, spec_algorithm) -> bool:
@@ -999,12 +996,12 @@ class KVCacheConfigurator:
         # other backends miss on some draft path: trtllm_mha's graph replay
         # refills its page table from stale lengths, and its eager build does
         # not widen the table by the draft block.
-        if not draft_backends <= _TRANSLATED_MHA_RAILS:
+        if not draft_backends <= TRANSLATED_MHA_RAILS:
             return FusedDraftDecision(
                 declined=(
                     f"the draft runs on {', '.join(sorted(draft_backends))}, "
                     "off the translated MHA rails "
-                    f"({', '.join(sorted(_TRANSLATED_MHA_RAILS))})"
+                    f"({', '.join(sorted(TRANSLATED_MHA_RAILS))})"
                 )
             )
         # Under DCP each rank's host rows hold only its share of the widened
