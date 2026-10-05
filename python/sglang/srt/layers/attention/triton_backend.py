@@ -68,6 +68,7 @@ if _is_cuda:
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
+    from sglang.srt.mem_cache.kv_loc_plan import KVLocPlan
     from sglang.srt.model_executor.model_runner import ModelRunner
     from sglang.srt.speculative.spec_info import SpecInput
 
@@ -493,6 +494,7 @@ class TritonAttnBackend(AttentionBackend):
 
     def _fill_kv_indptr_and_indices(
         self,
+        plan: KVLocPlan,
         bs: int,
         seq_lens: torch.Tensor,
         req_pool_indices: torch.Tensor,
@@ -500,17 +502,18 @@ class TritonAttnBackend(AttentionBackend):
     ) -> torch.Tensor:
         kv_indptr = self.kv_indptr[: bs + 1]
         kv_indptr[1:] = torch.cumsum(seq_lens, dim=0)
-        self.kv_index_translator.fill_packed_read_stream(
-            req_pool_indices=req_pool_indices[:bs],
+        self.kv_index_translator.pack_read_stream(
+            plan,
+            req_pool_indices=req_pool_indices,
             seq_lens=seq_lens[:bs],
             indptr=kv_indptr,
-            total_tokens=kv_indices.numel(),
             out=kv_indices,
         )
         return kv_indptr
 
     def _update_decode_kv_buffers(
         self,
+        plan: KVLocPlan,
         bs: int,
         seq_lens: torch.Tensor,
         req_pool_indices: torch.Tensor,
@@ -539,7 +542,7 @@ class TritonAttnBackend(AttentionBackend):
             num_kv_splits_lens = dcp_seq_lens.clamp_min(1)
         else:
             kv_indptr = self._fill_kv_indptr_and_indices(
-                bs, seq_lens, req_pool_indices, self.cuda_graph_kv_indices
+                plan, bs, seq_lens, req_pool_indices, self.cuda_graph_kv_indices
             )
             num_kv_splits_lens = seq_lens
         window_kv_indptr = self.window_kv_indptr
@@ -548,6 +551,7 @@ class TritonAttnBackend(AttentionBackend):
             window_kv_indptr, _, window_kv_lens, _ = update_sliding_window_buffer(
                 self.window_kv_indptr,
                 self.kv_index_translator,
+                plan,
                 req_pool_indices,
                 self.sliding_window_size,
                 seq_lens,
@@ -565,6 +569,7 @@ class TritonAttnBackend(AttentionBackend):
 
     def _update_target_verify_buffers(
         self,
+        plan: KVLocPlan,
         bs: int,
         seq_lens: torch.Tensor,
         spec_info,
@@ -581,7 +586,7 @@ class TritonAttnBackend(AttentionBackend):
             device=self.device,
         )
         kv_indptr = self._fill_kv_indptr_and_indices(
-            bs, seq_lens, req_pool_indices, self.cuda_graph_kv_indices
+            plan, bs, seq_lens, req_pool_indices, self.cuda_graph_kv_indices
         )
         window_kv_indptr = self.window_kv_indptr
         window_kv_indices = None
@@ -595,6 +600,7 @@ class TritonAttnBackend(AttentionBackend):
                 update_sliding_window_buffer(
                     self.window_kv_indptr,
                     self.kv_index_translator,
+                    plan,
                     req_pool_indices,
                     self.sliding_window_size,
                     seq_lens[:bs],
@@ -626,6 +632,7 @@ class TritonAttnBackend(AttentionBackend):
 
     def _update_dllm_buffers(
         self,
+        plan: KVLocPlan,
         bs: int,
         seq_lens: torch.Tensor,
         req_pool_indices: torch.Tensor,
@@ -642,12 +649,13 @@ class TritonAttnBackend(AttentionBackend):
             device=self.device,
         )
         self._fill_kv_indptr_and_indices(
-            bs, prefix_lens, req_pool_indices, self.cuda_graph_kv_indices
+            plan, bs, prefix_lens, req_pool_indices, self.cuda_graph_kv_indices
         )
         if self.sliding_window_size is not None and self.sliding_window_size > 0:
             update_sliding_window_buffer(
                 self.window_kv_indptr,
                 self.kv_index_translator,
+                plan,
                 req_pool_indices,
                 self.sliding_window_size,
                 prefix_lens,
@@ -658,6 +666,7 @@ class TritonAttnBackend(AttentionBackend):
 
     def _update_draft_extend_buffers(
         self,
+        plan: KVLocPlan,
         bs: int,
         seq_lens: torch.Tensor,
         forward_mode: ForwardMode,
@@ -693,7 +702,7 @@ class TritonAttnBackend(AttentionBackend):
             extend_seq_lens = torch.zeros(bs, dtype=torch.int32, device=seq_lens.device)
         kv_lens = torch.clamp(seq_lens - extend_seq_lens, min=0).to(torch.int32)
         kv_indptr = self._fill_kv_indptr_and_indices(
-            bs, kv_lens, req_pool_indices, self.cuda_graph_kv_indices
+            plan, bs, kv_lens, req_pool_indices, self.cuda_graph_kv_indices
         )
         return qo_indptr, kv_indptr, num_tokens_per_req
 
@@ -736,6 +745,7 @@ class TritonAttnBackend(AttentionBackend):
                 return
 
             self._apply_cuda_graph_metadata(
+                plan=forward_batch.kv_loc_plan,
                 bs=bs,
                 req_pool_indices=req_pool_indices,
                 seq_lens=seq_lens,
@@ -753,6 +763,7 @@ class TritonAttnBackend(AttentionBackend):
             )
         else:
             self._apply_cuda_graph_metadata(
+                plan=forward_batch.kv_loc_plan,
                 bs=bs,
                 req_pool_indices=req_pool_indices,
                 seq_lens=seq_lens,
@@ -821,6 +832,7 @@ class TritonAttnBackend(AttentionBackend):
                         seq_lens_sum, dtype=torch.int64, device=self.device
                     )
                     kv_indptr = self._fill_kv_indptr_and_indices(
+                        forward_batch.kv_loc_plan,
                         bs,
                         forward_batch.seq_lens,
                         forward_batch.req_pool_indices,
@@ -834,6 +846,7 @@ class TritonAttnBackend(AttentionBackend):
                         update_sliding_window_buffer(
                             self.window_kv_indptr,
                             self.kv_index_translator,
+                            forward_batch.kv_loc_plan,
                             forward_batch.req_pool_indices,
                             self.sliding_window_size,
                             forward_batch.seq_lens,
@@ -920,6 +933,7 @@ class TritonAttnBackend(AttentionBackend):
                 seq_lens_sum, dtype=torch.int64, device=self.device
             )
             kv_indptr = self._fill_kv_indptr_and_indices(
+                forward_batch.kv_loc_plan,
                 bs,
                 forward_batch.seq_lens,
                 forward_batch.req_pool_indices,
@@ -936,6 +950,7 @@ class TritonAttnBackend(AttentionBackend):
                 ) = update_sliding_window_buffer(
                     self.window_kv_indptr,
                     self.kv_index_translator,
+                    forward_batch.kv_loc_plan,
                     forward_batch.req_pool_indices,
                     self.sliding_window_size,
                     forward_batch.seq_lens,
@@ -975,6 +990,7 @@ class TritonAttnBackend(AttentionBackend):
                     device=self.device,
                 )
                 kv_indptr = self._fill_kv_indptr_and_indices(
+                    forward_batch.kv_loc_plan,
                     bs,
                     forward_batch.extend_prefix_lens,
                     forward_batch.req_pool_indices,
@@ -989,6 +1005,7 @@ class TritonAttnBackend(AttentionBackend):
                 ) = update_sliding_window_buffer(
                     self.window_kv_indptr,
                     self.kv_index_translator,
+                    forward_batch.kv_loc_plan,
                     forward_batch.req_pool_indices,
                     self.sliding_window_size,
                     forward_batch.extend_prefix_lens,
@@ -1266,6 +1283,7 @@ class TritonAttnBackend(AttentionBackend):
 
     def _apply_cuda_graph_metadata(
         self,
+        plan: KVLocPlan,
         bs: int,
         req_pool_indices: torch.Tensor,
         seq_lens: torch.Tensor,
@@ -1280,7 +1298,7 @@ class TritonAttnBackend(AttentionBackend):
         if forward_mode.is_decode_or_idle():
             assert spec_info is None, "Multi-step cuda graph init is not done here."
             _, _, window_kv_lens, num_kv_splits_lens = self._update_decode_kv_buffers(
-                bs, seq_lens, req_pool_indices
+                plan, bs, seq_lens, req_pool_indices
             )
             self.get_num_kv_splits(
                 self.cuda_graph_num_kv_splits[:bs], num_kv_splits_lens[:bs]
@@ -1292,13 +1310,13 @@ class TritonAttnBackend(AttentionBackend):
         elif forward_mode.is_target_verify():
             bs = len(req_pool_indices)
             self._update_target_verify_buffers(
-                bs, seq_lens, spec_info, req_pool_indices
+                plan, bs, seq_lens, spec_info, req_pool_indices
             )
         elif forward_mode.is_dllm_extend():
-            self._update_dllm_buffers(bs, seq_lens, req_pool_indices)
+            self._update_dllm_buffers(plan, bs, seq_lens, req_pool_indices)
         elif forward_mode.is_draft_extend_v2():
             self._update_draft_extend_buffers(
-                bs, seq_lens, forward_mode, spec_info, req_pool_indices
+                plan, bs, seq_lens, forward_mode, spec_info, req_pool_indices
             )
         else:
             raise ValueError(
@@ -2511,6 +2529,7 @@ class TritonMultiStepDraftBackend:
 def update_sliding_window_buffer(
     window_kv_indptr,
     translator,
+    plan,
     req_pool_indices,
     sliding_window_size,
     seq_lens,
@@ -2542,11 +2561,11 @@ def update_sliding_window_buffer(
             window_kv_indptr[-1], dtype=torch.int64, device=device
         )
     window_kv_start_idx = seq_lens - window_kv_lens
-    translated = translator.fill_packed_read_stream(
-        req_pool_indices=req_pool_indices[:bs],
+    translated = translator.pack_read_stream(
+        plan,
+        req_pool_indices=req_pool_indices,
         seq_lens=window_kv_lens,
         indptr=window_kv_indptr,
-        total_tokens=window_kv_indices.numel(),
         out=window_kv_indices,
         kv_start_idx=window_kv_start_idx,
         sliding_window=(
