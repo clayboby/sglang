@@ -40,6 +40,7 @@ from sglang.srt.utils import is_gfx95_supported
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
+    from sglang.srt.mem_cache.kv_loc_plan import KVLocPlan
     from sglang.srt.model_executor.model_runner import ModelRunner
     from sglang.srt.speculative.spec_info import SpecInput
 
@@ -1948,6 +1949,7 @@ class AiterAttnBackend(AttentionBackend):
                         paged_kernel_lens=forward_batch.seq_lens,
                         paged_kernel_lens_sum=forward_batch.seq_lens_sum,
                         translator=self.kv_index_translator,
+                        plan=forward_batch.kv_loc_plan,
                     )
                 )
                 self.forward_metadata = ForwardMetadata(
@@ -2147,6 +2149,7 @@ class AiterAttnBackend(AttentionBackend):
                     max(forward_batch.extend_seq_lens_cpu),
                     forward_batch.seq_lens_cpu.max().item(),
                     spec_info=None,
+                    plan=forward_batch.kv_loc_plan,
                 )
 
                 max_q_len = self.mla_indices_updater_prefill.max_q_len
@@ -2187,6 +2190,7 @@ class AiterAttnBackend(AttentionBackend):
                     prefix_lens,
                     encoder_lens=forward_batch.encoder_lens,
                     spec_info=None,
+                    plan=forward_batch.kv_loc_plan,
                 )
 
                 if self.use_sliding_window_kv_pool:
@@ -4447,6 +4451,8 @@ class AiterIndicesUpdaterPrefill:
         prefix_lens: torch.Tensor,
         encoder_lens: Optional[torch.Tensor],
         spec_info: Optional[SpecInput],
+        *,
+        plan: KVLocPlan,
     ):
         # Keep the signature for type checking. It will be assigned during runtime.
         raise NotImplementedError()
@@ -4459,6 +4465,8 @@ class AiterIndicesUpdaterPrefill:
         prefix_lens: torch.Tensor,
         encoder_lens: Optional[torch.Tensor],
         spec_info: Optional[SpecInput],
+        *,
+        plan: KVLocPlan,
     ):
         kv_start_idx = None
         kv_indptr = self.kv_indptr
@@ -4508,6 +4516,7 @@ class AiterIndicesUpdaterPrefill:
                     paged_kernel_lens=paged_kernel_lens,
                     paged_kernel_lens_sum=paged_kernel_lens_sum,
                     translator=self.kv_index_translator,
+                    plan=plan,
                 )
             )
 
@@ -4540,6 +4549,8 @@ class AiterMlaIndicesUpdaterPrefill:
         max_q_len: int,
         max_kv_len: int,
         spec_info: Optional[SpecInput],
+        *,
+        plan: KVLocPlan,
     ):
         # Keep the signature for type checking. It will be assigned during runtime.
         raise NotImplementedError()
@@ -4553,6 +4564,8 @@ class AiterMlaIndicesUpdaterPrefill:
         max_q_len: int,
         max_kv_len: int,
         spec_info: Optional[SpecInput],
+        *,
+        plan: KVLocPlan,
     ):
         bs = len(req_pool_indices)
 
@@ -4587,6 +4600,7 @@ class AiterMlaIndicesUpdaterPrefill:
                     paged_kernel_lens=kv_lens,
                     paged_kernel_lens_sum=kv_lens_sum,
                     translator=self.kv_index_translator,
+                    plan=plan,
                 )
             )
 
