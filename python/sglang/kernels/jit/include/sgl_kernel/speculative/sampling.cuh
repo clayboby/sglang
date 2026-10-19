@@ -78,7 +78,14 @@ __global__ void TreeSpeculativeSamplingTargetOnly(
       prob_acc += target_prob_single;
 
       const bool has_target_mass = target_prob_single > DType(0);
-      if (has_target_mass && (coin < prob_acc / threshold_acc || target_prob_single >= threshold_single)) {
+      // Half-open CDF test (#35798), except at the top of the coin range: coins are float32
+      // uniforms in [0, 1), so the largest coin is 1 - 2^-24. A bound that has reached that
+      // value already covers every coin, so it is treated as the end of the CDF. Otherwise a
+      // one-token nucleus renormalized to 1 - 2^-24 rejects its only token when the coin is
+      // 1 - 2^-24 (#42528). Bounds below 1 - 2^-24 keep the strict comparison.
+      const DType acc_bound = prob_acc / threshold_acc;
+      const bool bound_covers_all_coins = acc_bound >= DType(1) - DType(1) / DType(1 << 24);
+      if (has_target_mass && (coin < acc_bound || bound_covers_all_coins || target_prob_single >= threshold_single)) {
         // accept token
         prob_acc = 0.;
         cur_prob_offset = (bx * num_draft_tokens + cur_index) * d;
